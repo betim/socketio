@@ -1,66 +1,65 @@
 package socketio
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io/ioutil"
 	"net/http"
-	"strconv"
-	"strings"
 	"time"
 )
 
-// Session holds the configuration variables received from the socket.io
-// server.
+// Session holds the configuration variables received from the server
 type Session struct {
-	ID                 string
-	HeartbeatTimeout   time.Duration
-	ConnectionTimeout  time.Duration
-	SupportedProtocols []string
+	ID                 string        `json:"sid"`
+	HeartbeatTimeout   time.Duration `json:"pingInterval"`
+	ConnectionTimeout  time.Duration `json:"pingTimeout"`
+	SupportedProtocols []string      `json:"upgrades"`
+	URL                *urlParser
 }
 
-// NewSession receives the configuraiton variables from the socket.io
-// server.
-func NewSession(url string) (*Session, error) {
+// NewSession receives the configuraiton variables from the server
+func NewSession(url, path, query string) (*Session, error) {
 	urlParser, err := newURLParser(url)
 	if err != nil {
 		return nil, err
 	}
+
+	urlParser.path = path
 	response, err := http.Get(urlParser.handshake())
 	if err != nil {
-		return nil, err
+		return nil, errors.New("http.Get: " + err.Error())
 	}
 
 	body, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		return nil, err
+		return nil, errors.New("could not read body: " + err.Error())
 	}
 	response.Body.Close()
 
-	sessionVars := strings.Split(string(body), ":")
-	if len(sessionVars) != 4 {
-		return nil, errors.New("Session variables is not 4")
+	s := Session{
+		URL: urlParser,
 	}
 
-	id := sessionVars[0]
+	// for some reason, socket.io sends some garbage at the begining of the response
+	err = json.Unmarshal(body[bytes.Index(body, []byte("{")):], &s)
+	if err != nil {
+		return nil, errors.New("failed to handshake with the server: " + err.Error())
+	}
 
-	heartbeatTimeoutSec, _ := strconv.Atoi(sessionVars[1])
-	connectionTimeoutSec, _ := strconv.Atoi(sessionVars[2])
+	s.HeartbeatTimeout *= time.Second
+	s.ConnectionTimeout *= time.Second
 
-	heartbeatTimeout := time.Duration(heartbeatTimeoutSec) * time.Second
-	connectionTimeout := time.Duration(connectionTimeoutSec) * time.Second
-
-	supportedProtocols := strings.Split(string(sessionVars[3]), ",")
-
-	return &Session{id, heartbeatTimeout, connectionTimeout, supportedProtocols}, nil
+	return &s, nil
 }
 
-// SupportProtocol checks if the given protocol is supported by the
-// socket.io server.
+// SupportProtocol checks if the given protocol is supported by the server
 func (session *Session) SupportProtocol(protocol string) bool {
 	for _, supportedProtocol := range session.SupportedProtocols {
 		if protocol == supportedProtocol {
 			return true
 		}
 	}
+
 	return false
 }

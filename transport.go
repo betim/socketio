@@ -1,65 +1,78 @@
 package socketio
 
 import (
-	"code.google.com/p/go.net/websocket"
 	"errors"
-	"io"
+	"log"
+	"strings"
 	"time"
+
+	"golang.org/x/net/websocket"
 )
 
-// Transport is an interface for sending and receiving raw messages from
-// the socket.io server.
-type transport interface {
-	Send(string) error
-	Receive() (string, error)
-	io.Closer
-}
-
-// NewTransport returns an implemented transport which is also supported
-// by the socket.io server.
-func newTransport(session *Session, url string) (transport, error) {
-	if session.SupportProtocol("websocket") {
-		return newWsTransport(session, url)
+func newTransport(socket *Socket) error {
+	if !socket.Session.SupportProtocol("websocket") {
+		return errors.New("websocket protocol is not supported by server")
 	}
 
-	return nil, errors.New("none of the implemented protocols are supported by the server ")
-}
-
-// WSTransport implements Transport interface for websocket protocol.
-type wsTransport struct {
-	Conn        *websocket.Conn
-	readTimeout time.Duration
-}
-
-func newWsTransport(session *Session, url string) (*wsTransport, error) {
-	urlParser, err := newURLParser(url)
+	c, err := websocket.NewConfig(
+		socket.Session.URL.websocket(socket.Session.ID), socket.Session.URL.origin())
 	if err != nil {
-		return nil, err
+		return errors.New("could not create ws config: " + err.Error())
 	}
-	ws, err := websocket.Dial(urlParser.websocket(session.ID), "", "http://localhost/")
+
+	ws, err := websocket.DialConfig(c)
 	if err != nil {
-		return nil, err
+		return errors.New("could not dial the server: " + err.Error())
 	}
-	//expect to receive message once in each HartbeatTimeout
-	readTimeout := session.HeartbeatTimeout + time.Second
-	return &wsTransport{ws, readTimeout}, nil
-}
 
-func (wsTransport *wsTransport) Send(rawMsg string) error {
-	return websocket.Message.Send(wsTransport.Conn, rawMsg)
-}
-
-func (wsTransport *wsTransport) Receive() (string, error) {
-	var rawMsg string
-	wsTransport.Conn.SetReadDeadline(time.Now().Add(wsTransport.readTimeout))
-	err := websocket.Message.Receive(wsTransport.Conn, &rawMsg)
+	_, err = ws.Write(connectMsg().Bytes())
 	if err != nil {
-		return "", err
+		return errors.New("could not write connect message: " + err.Error())
 	}
 
-	return rawMsg, nil
-}
+	go func() {
+		ticker := time.NewTicker(socket.Session.HeartbeatTimeout)
+		for {
+			select {
+			case msg := <-socket.Send:
+				ws.Write(msg.Bytes())
+			case <-ticker.C:
+				ws.Write(heartbeatMsg().Bytes())
+			}
+		}
+	}()
 
-func (wsTransport *wsTransport) Close() error {
-	return wsTransport.Conn.Close()
+	go func() error {
+		for {
+			buff := make([]byte, 16*1024)
+			n, err := ws.Read(buff)
+			if err != nil {
+				return errors.New("error from server: " + err.Error())
+			}
+
+			body := string(buff[:n])
+
+			if strings.HasPrefix(body, "3probe") {
+				socket.Send <- ackMsg()
+			}
+
+			// This is a heartbeat reply, ignore
+			if strings.HasPrefix(body, HeartBeatReply) {
+				continue
+			}
+
+			if strings.HasPrefix(body, MsgFromServer) {
+				msg, err := parseMessage(buff[:n])
+				if err != nil {
+					return errors.New("failed to parse the response from server: " + err.Error())
+				}
+
+				socket.Receive <- msg
+			} else {
+				log.Println("received something that dont know how to parse")
+			}
+		}
+	}()
+
+	return nil
 }

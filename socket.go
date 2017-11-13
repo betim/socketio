@@ -1,78 +1,29 @@
-// Package socketio implements a client for SocketIO protocol
-// as specified in https://github.com/LearnBoost/socket.io-spec
 package socketio
 
-import (
-	"time"
-)
+import "errors"
 
+// Socket holds info with whom and as who is connected and 2 communication chans
 type Socket struct {
-	URL       string
-	Session   *Session
-	Transport transport
+	URL     string
+	Session *Session
+	Receive chan *Message
+	Send    chan *Message
 }
 
-// Dial opens a new client connection to the socket.io server then connects
-// to the given channel.
-func DialAndConnect(url string, channel string, query string) (*Socket, error) {
-	socket, err := Dial(url)
+// Stream will try to handshake and establish a new session
+// then will try to establish a websocket connection and return a *Socket
+func Stream(url string, path string, query string) (*Socket, error) {
+	session, err := NewSession(url, path, query)
 	if err != nil {
+		return nil, errors.New("could not create a new session: " + err.Error())
+	}
+
+	rch := make(chan *Message)
+	sch := make(chan *Message)
+	s := &Socket{url, session, rch, sch}
+	if err := newTransport(s); err != nil {
 		return nil, err
 	}
 
-	endpoint := NewEndpoint(channel, query)
-	connectMsg := NewConnect(endpoint)
-	socket.Send(connectMsg)
-
-	return socket, nil
-}
-
-// Dial opens a new client connection to the socket.io server using one of
-// the implemented and supported Transports.
-func Dial(url string) (*Socket, error) {
-	session, err := NewSession(url)
-	if err != nil {
-		return nil, err
-	}
-
-	transport, err := newTransport(session, url)
-	if err != nil {
-		return nil, err
-	}
-
-	// Heartbeat goroutine
-	go func() {
-		heartbeatMsg := NewHeartbeat()
-		for {
-			time.Sleep(session.HeartbeatTimeout - time.Second)
-			err := transport.Send(heartbeatMsg.String())
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	return &Socket{url, session, transport}, nil
-}
-
-// Receive receives the raw message from the underlying transport and
-// converts it to the Message type.
-func (socket *Socket) Receive() (*Message, error) {
-	rawMsg, err := socket.Transport.Receive()
-	if err != nil {
-		return nil, err
-	}
-
-	return parseMessage(rawMsg)
-}
-
-// Send sends the given Message to the socket.io server using it's
-// underlying transport.
-func (socket *Socket) Send(msg *Message) error {
-	return socket.Transport.Send(msg.String())
-}
-
-// Close underlying transport
-func (socket *Socket) Close() error {
-	return socket.Transport.Close()
+	return s, nil
 }
